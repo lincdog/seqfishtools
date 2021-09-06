@@ -1,0 +1,10 @@
+docs/
+__pycache__/
+*.out
+*.npy
+*.log
+*.png
+*.tif
+*.pickle
+.idea
+*.snakemake
