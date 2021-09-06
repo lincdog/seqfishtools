@@ -1,4 +1,4 @@
-name: seqfish-env
+name: seqfishtools-env
 channels:
   - conda-forge
   - defaults

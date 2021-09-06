@@ -378,3 +378,31 @@ def get_stage_positions(filename, px_size=0.111, to_df=False):
         return pd.DataFrame(positions)
     else:
         return positions
+
+
+def get_stage_positions_2(filename, px_size=0.111, to_df=False):
+    """
+    An alternative implementation of get_stage_positions with jmespath
+    """
+
+    with open(filename, 'r') as f:
+        content = json.load(f)
+
+    positions = jmespath.search(
+        'POSITIONS[].{label: LABEL, '
+        'gridrow: GRID_ROW, '
+        'gridcol: GRID_COL, '
+        'x: sum(DEVICES[?DEVICE == `XYStage`].X), '
+        'y: sum(DEVICES[?DEVICE == `XYStage`].Y), '
+        'z: sum(DEVICES[?DEVICE == `Adaptive Focus Control Offset`].X)}',
+        content
+    )
+
+    for pos in positions:
+        pos['xpx'] = round(pos['x'] / px_size)
+        pos['ypx'] = round(pos['y'] / px_size)
+
+    if to_df:
+        return pd.DataFrame(positions)
+    else:
+        return positions
