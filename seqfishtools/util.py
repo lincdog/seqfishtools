@@ -1,13 +1,168 @@
-import numpy as np
-import pandas as pd
-import tifffile as tif
-import json
 import re
 import os
+import json
 import string
-from pathlib import Path, PurePath
+import numpy as np
+import pandas as pd
 import jmespath
+import xmlschema
+import tifffile as tif
+
+from lxml import etree
+from pathlib import Path, PurePath
 from PIL import Image, ImageSequence, UnidentifiedImageError
+
+# Namespace prefixes for convenience when working with xpath
+ns = {
+    'OME': 'http://www.openmicroscopy.org/Schemas/OME/2015-01',
+    'xsi': 'http://www.w3.org/2001/XMLSchema-instance'
+}
+# Mapping of schema source URL to local file path
+schemas = {
+    'http://www.openmicroscopy.org/Schemas/OME/2015-01':
+    Path(__file__).parent / 'xml/ome.xsd'
+}
+
+
+def _convert_types(data):
+    data = dict(data)
+
+    def _convert(i):
+        r = i
+        try:
+            if '.' in i:
+                r = float(i)
+            else:
+                r = int(i)
+        except (TypeError, ValueError):
+            pass
+        return r
+
+    for k, v in data.items():
+        if not isinstance(v, str):
+            continue
+
+        data[k] = _convert(v)
+
+    return data
+
+
+class OMEImageLoader:
+
+    def __init__(
+            self,
+            fname,
+            schema=None,
+
+    ):
+        self.metadata_file = None
+        self.raw_metadata = None
+        self.metadata_etree = None
+        self.metadata = None
+        self.schema = None
+        self.master_tiff = None
+        self.root = None
+
+        given_metadata = tif.TiffFile(fname).ome_metadata
+
+        if not given_metadata:
+            raise ValueError('The supplied file has no OME metadata readable by tifffile.')
+
+        fpath = Path(fname)
+
+        given_tree = etree.XML(given_metadata.encode())
+        root_namespace = given_tree.nsmap.get(None)
+
+        if root_namespace in schemas:
+            schema_location = schemas[root_namespace]
+        else:
+            schema_location = given_tree.xpath(
+                '@xsi:schemaLocation', namespaces=ns).split(' ')[-1]
+
+        try:
+            self.schema = xmlschema.XMLSchema(schema_location)
+        except:
+            self.schema = None
+
+        metadata_ref = given_tree.xpath('OME:*//@MetadataFile', namespaces=ns)
+
+        if len(metadata_ref) > 0:
+            metadata_ref[0] = str(metadata_ref[0])
+            metadata_file = Path(metadata_ref[0])
+
+            if not metadata_file.is_absolute():
+                # Make it relative to the supplied filename
+                metadata_file = fpath.with_name(metadata_ref[0])
+
+            if not metadata_file.exists():
+                raise FileNotFoundError(
+                    f'Supplied file {fname} referenced metadata file {metadata_ref[0]},'
+                    f' but this file was not found.'
+                )
+        else:
+            metadata_file = fpath
+
+        self.metadata_file = metadata_file.resolve()
+        self.master_tiff = tif.TiffFile(metadata_file)
+        self.root = metadata_file.parent
+        self.raw_metadata = self.master_tiff.ome_metadata.encode()
+
+        self.metadata_etree = etree.XML(self.raw_metadata)
+
+        result = dict()
+
+        for im in self.metadata_etree.xpath('OME:Image', namespaces=ns):
+            im_name = im.attrib['Name']
+
+            im_info = im.xpath(
+                'OME:Pixels',
+                namespaces=ns
+            )[0].attrib
+
+            im_channels = [
+                _convert_types(chan.attrib)
+                for chan in im.xpath(
+                    'OME:Pixels/OME:Channel',
+                    namespaces=ns)
+            ]
+
+            im_planes = [
+                _convert_types(plane.attrib)
+                for plane in im.xpath('OME:Pixels/OME:Plane', namespaces=ns)
+            ]
+
+            im_info = dict(im_info)
+            im_info['channels'] = im_channels
+            im_info['planes'] = im_planes
+            result[im_name] = im_info
+
+        self.metadata = result
+
+    def get_metadata(self, fname):
+        fname = Path(fname).resolve()
+
+        if not self.root.samefile(fname.parent):
+            raise ValueError(f'Target file {fname} is not in the same directory '
+                             f'as instance metadata file {self.metadata_file}.')
+
+        stem = fname.name.removesuffix('.ome.tif')
+
+        return self.metadata[stem]
+
+    def imread(self, fname):
+        plane_metadata = self.get_metadata(fname)['planes']
+
+        pil_im = pil_imopen(fname)
+
+        im_arr = pil_frames_to_ndarray(
+            pil_im,
+            plane_metadata,
+            dtype=np.uint16,
+            channel_key='TheC',
+            slice_key='TheZ'
+        )
+
+        return im_arr
 
 
 def make_align_name(position, hyb):
@@ -57,7 +212,7 @@ def pil_imread(
     try:
         im = pil_imopen(fname)
         md = pil_getmetadata(im)
-        imarr = pil_frames_to_ndarray(im)
+        imarr = pil_frames_to_ndarray(im, md)
         pil_succeeded = True
     except (ValueError, UnidentifiedImageError, AssertionError) as e:
 
@@ -141,7 +296,13 @@ def pil2numpy(im, dtype=np.uint16):
     return np.frombuffer(im.tobytes(), dtype=dtype).reshape(im.size)
 
 
-def pil_frames_to_ndarray(im, dtype=np.uint16):
+def pil_frames_to_ndarray(
+        im,
+        metadata,
+        dtype=np.uint16,
+        channel_key='ChannelIndex',
+        slice_key='SliceIndex'
+):
     """
     pil_frames_to_ndarray
     -----------------
@@ -152,7 +313,7 @@ def pil_frames_to_ndarray(im, dtype=np.uint16):
     in the stack, and insert them one by one into the correct position
     of a 4D numpy array.
     """
-    metadata = pil_getmetadata(im)
+    #metadata = pil_getmetadata(im)
 
     if not metadata:
         raise ValueError('Supplied image lacks metadata used for '
@@ -160,9 +321,9 @@ def pil_frames_to_ndarray(im, dtype=np.uint16):
             'taken from ImageJ/MicroManager?')
 
     # Gives a list of ChannelIndex for each frame
-    cinds = jmespath.search('[].ChannelIndex', metadata)
+    cinds = jmespath.search(f'[].{channel_key}', metadata)
     # Gives a list of SliceIndex for each frame
-    zinds = jmespath.search('[].SliceIndex', metadata)
+    zinds = jmespath.search(f'[].{slice_key}', metadata)
 
     if (len(cinds) != len(zinds)
         or any([c is None for c in cinds])
@@ -192,7 +353,7 @@ def pil_frames_to_ndarray(im, dtype=np.uint16):
             # Find the frame whose ChannelIndex and SliceIndex
             # match the current c and z values
             entry = jmespath.search(
-                f'[?ChannelIndex==`{c}` && SliceIndex==`{z}`]', metadata)[0]
+                f'[?{channel_key}==`{c}` && {slice_key}==`{z}`]', metadata)[0]
 
             # Find the *index* of the matching frame so that we can insert it
             ind = metadata.index(entry)

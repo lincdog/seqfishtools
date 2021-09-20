@@ -6,5 +6,6 @@ from .util import (
     pil_getmetadata,
     pil_frames_to_ndarray,
     pil2numpy,
-    find_matching_files
+    find_matching_files,
+    OMEImageLoader
 )
