@@ -20,3 +20,5 @@ jupyterlab
 notebook
 setuptools
 wheel
+lxml
+xmlschema
