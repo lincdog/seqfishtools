@@ -5,8 +5,11 @@ import grp
 import re
 import sys
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from argparse import ArgumentParser
+from contextlib import redirect_stdout
 from pathlib import Path
+from copy import copy
 
 try:
     from datapipeline.load_tiff import tiffy
@@ -49,6 +52,9 @@ def test_open_tiff(fname):
     return im
 
 def test_tiff_dtype(im):
+    if im is None:
+        return
+
     if im.dtype != np.uint16:
         raise TypeError(f'Image datatype is {im.dtype}, should be'
                         'np.uint16.')
@@ -182,24 +188,29 @@ def test_image_folder_contents(folder):
     return folder_contents_info
 
 def test_image_opening(entry):
-    entry['shape'] = None
-    entry['opening_errors'] = []
+    updated_entry = copy(entry)
+    updated_entry['shape'] = None
+
+    updated_entry['opening_errors'] = []
+    im = None
+
     try:
-        im = test_open_tiff(entry['path'])
-        entry['shape'] = im.shape
+        im = test_open_tiff(updated_entry['path'])
+        updated_entry['shape'] = im.shape
     except Exception as e:
-        entry['opening_errors'].append(e)
+        updated_entry['opening_errors'].append(e)
 
     try:
         test_tiff_dtype(im)
     except TypeError as e:
-        entry['opening_errors'].append(e)
+        updated_entry['opening_errors'].append(e)
 
     del im
 
-    return entry
+    return updated_entry
 
 def check_all_images(results, hyb_nums=None, pos_nums=None):
+    to_check = []
 
     for hyb_entry in results:
         if len(hyb_entry['errors']) > 0:
@@ -215,15 +226,24 @@ def check_all_images(results, hyb_nums=None, pos_nums=None):
                 and im_entry['number'] not in pos_nums):
                 continue
 
-            im_name = im_entry['name']
-            im_entry = test_image_opening(im_entry)
+            im_entry_copy = copy(im_entry)
+            im_entry_copy['hyb_name'] = hyb_entry['name']
+            im_entry_copy['hyb_number'] = hyb_entry['number']
+            to_check.append(im_entry_copy)
 
-            im_open_errors = im_entry['opening_errors']
-            print(f'{im_name}: {len(im_open_errors)} errors opening TIFF')
-            for e in im_open_errors:
-                print(f'        ', str(e))
+    checked = []
 
-    return results
+    with ThreadPoolExecutor(max_workers=10) as exe:
+        futures = []
+        for im_entry in to_check:
+            futures.append(exe.submit(test_image_opening, im_entry))
+        for fut in as_completed(futures):
+            if len(checked) % 5 == 0:
+                print(f'done with {len(checked)} images')
+
+            checked.append(fut.result(1))
+
+    return checked
 
 def check_tree(root):
     root = Path(root)
@@ -235,6 +255,8 @@ def check_tree(root):
 
     return hyb_folder_info, extra_folders
 
+def global_checks(results, image_results=None):
+    pass
 
 def sort_key(d):
     n = d['number']
