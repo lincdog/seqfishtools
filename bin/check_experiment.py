@@ -32,6 +32,9 @@ def parse_args():
     parser.add_argument('dataset', help='The path to the root folder of'
                         ' the experiment to check. This is the folder that '
                         'contains the `HybCycle_*` folders.')
+    parser.add_argument('--output', type=Path, default=sys.stdout,
+                        help='The filename to print the '
+                        'results report to. By default goes to stdout.')
     parser.add_argument('--fast', action='store_true', help='If supplied, only '
                         'perform the fast steps of file validation; do not try to '
                         'open every TIFF, only check existence and permissions of '
@@ -237,11 +240,15 @@ def check_all_images(results, hyb_nums=None, pos_nums=None):
         futures = []
         for im_entry in to_check:
             futures.append(exe.submit(test_image_opening, im_entry))
+        done = 0
         for fut in as_completed(futures):
-            if len(checked) % 5 == 0:
-                print(f'done with {len(checked)} images')
+            done += 1
+            if done % 5 == 0:
+                print(f'done with {done}/{len(futures)} images')
 
-            checked.append(fut.result(1))
+            result = fut.result(1)
+            if len(result['opening_errors']) > 0:
+                checked.append(result)
 
     return checked
 
@@ -265,11 +272,11 @@ def sort_key(d):
     else:
         return n
 
-def print_errors(results, extra_folders):
+def print_errors(results, extra_folders, output_file):
     results = sorted(results, key=sort_key)
 
     for extra in extra_folders:
-        print(f'Note: extra folder {extra}')
+        print(f'Note: extra folder {extra}', file=output_file)
 
     for folder_entry in results:
         folder_errors = folder_entry['errors']
@@ -282,28 +289,50 @@ def print_errors(results, extra_folders):
         folder_number = folder_entry['number']
 
         if len(folder_errors) == 0 and len(folder_contents_errors) == 0:
-            print(f'{folder_name}: No problems.')
+            print(f'{folder_name}: No problems.', file=output_file)
             continue
 
         print(f'{folder_name}')
 
         if len(folder_errors) > 0:
-            print(f'{len(folder_errors)} folder errors.')
+            print(f'{len(folder_errors)} folder errors.', file=output_file)
             for e in folder_errors:
-                print('    ', str(e))
+                print('    ', str(e), file=output_file)
 
         if len(folder_contents_errors) > 0:
             for c in folder_contents_errors:
                 im_name = c['name']
                 im_number = c['number']
                 im_errors = c['errors']
-                print(f'    {folder_name} / {im_name} had {len(im_errors)} errors:')
+                print(f'    {folder_name} / {im_name} had {len(im_errors)} errors:',
+                      file=output_file)
                 for e in im_errors:
-                    print('        ', str(e))
+                    print('        ', str(e), file=output_file)
 
+
+def print_opening_errors(opening_results, output_file):
+    print('----------------------------', file=output_file)
+    print('Image Opening Errors', file=output_file)
+
+    for c in opening_results:
+        im_name = c['name']
+        hyb_name = c['hyb_name']
+        im_number = c['number']
+        im_errors = c['opening_errors']
+        print(f'    {hyb_name} / {im_name} had {len(im_errors)} errors:',
+              file=output_file)
+        for e in im_errors:
+            print('        ', str(e), file=output_file)
 
 def main(args):
-    print_errors(*check_tree(args.root))
+    with open(args.output, 'w') as output_file:
+        results, extras = check_tree(args.dataset)
+
+        print_errors(results, extras, output_file)
+
+        if not args.fast:
+            opening_results = check_all_images(results)
+            print_opening_errors(opening_results, output_file)
 
 if __name__ == '__main__':
     args = parse_args()
