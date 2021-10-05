@@ -226,6 +226,8 @@ class ImHashV1(ImHashFormat):
         return tuple([int(s) for s in val_stripped.split(cls.delim)])
 
 class ImHashSparse(ImHashV1):
+    prefix = '__ImHashSparse:'
+
     @staticmethod
     def hash_frame(frame):
         return hash(frame.ravel()[::200].tobytes())
@@ -274,13 +276,21 @@ def decode_nd_hashes(hashes_formatted, format_class=ImHashV1):
     """
 
     hashes = dict()
+    errors = dict()
 
     for k, v in hashes_formatted.items():
-        if not (isinstance(v, str) and v.startswith(format_class.prefix)):
-            continue
+        try:
+            assert isinstance(v, str)
+            k_int = int(k)
+            val_decoded = format_class.decode(v)
+        except (AssertionError, ValueError) as e:
+            errors[k] = e
+        else:
+            hashes[k_int] = val_decoded
 
-        k_int = int(k)
-        hashes[k_int] = format_class.decode(v)
+    if len(errors) == len(hashes_formatted):
+        raise ValueError(f'Unable to decode metadata values using {format_class.__name__}.'
+                         ' Are you using the correct format class for this image?')
 
     return hashes
 
@@ -382,7 +392,8 @@ def parse_nd_image_hashes(image, format_class=ImHashV1):
     out = decode_nd_hashes(raw, format_class=format_class)
 
     assert n_frames == len(out), \
-        f'ImageDescription metadata did not contain an entry for each of {n_frames} image frames.'
+        f'ImageDescription metadata had {len(out)} entries, but there are ' \
+        f'{n_frames} frames in the image.'
 
     ndims = len(list(out.values())[0])
     shape = tuple([1 + max([v[dim] for v in out.values()])
