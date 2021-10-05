@@ -9,6 +9,7 @@ import xmlschema
 import tifffile as tif
 
 from lxml import etree
+from hashlib import sha256, blake2b
 from pathlib import Path, PurePath
 from PIL import Image, ImageSequence, UnidentifiedImageError
 
@@ -209,7 +210,7 @@ class ImHashV1(ImHashFormat):
 
     @staticmethod
     def hash_frame(frame):
-        return hash(frame.tobytes())
+        return blake2b(frame.tobytes()).hexdigest()
 
     @classmethod
     def encode(cls, inds):
@@ -225,12 +226,14 @@ class ImHashV1(ImHashFormat):
 
         return tuple([int(s) for s in val_stripped.split(cls.delim)])
 
+
 class ImHashSparse(ImHashV1):
     prefix = '__ImHashSparse:'
 
     @staticmethod
     def hash_frame(frame):
-        return hash(frame.ravel()[::200].tobytes())
+        return super().hash_frame(frame.ravel()[::200])
+
 
 def hash_nd_image(im, format_class=ImHashV1):
     """
@@ -258,12 +261,10 @@ def encode_nd_hashes(hashes, format_class=ImHashV1):
     """
     hashes_formatted = dict()
 
-    for k_int, inds in hashes.items():
-        k_str = str(k_int)
-
+    for k, inds in hashes.items():
         formatted_inds = format_class.encode(inds)
 
-        hashes_formatted[k_str] = formatted_inds
+        hashes_formatted[k] = formatted_inds
 
     return hashes_formatted
 
@@ -281,12 +282,11 @@ def decode_nd_hashes(hashes_formatted, format_class=ImHashV1):
     for k, v in hashes_formatted.items():
         try:
             assert isinstance(v, str)
-            k_int = int(k)
             val_decoded = format_class.decode(v)
         except (AssertionError, ValueError) as e:
             errors[k] = e
         else:
-            hashes[k_int] = val_decoded
+            hashes[k] = val_decoded
 
     if len(errors) == len(hashes_formatted):
         raise ValueError(f'Unable to decode metadata values using {format_class.__name__}.'
