@@ -206,6 +206,10 @@ class ImHashV1(ImHashFormat):
 
         return tuple([int(s) for s in val_stripped.split(cls.delim)])
 
+class ImHashSparse(ImHashV1):
+    @staticmethod
+    def hash_frame(frame):
+        return hash(frame.ravel()[::200].tobytes())
 
 def hash_nd_image(im, format_class=ImHashV1):
     """
