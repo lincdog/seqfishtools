@@ -7,7 +7,6 @@ import sys
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from argparse import ArgumentParser
-from contextlib import redirect_stdout
 from pathlib import Path
 from copy import copy
 
@@ -27,12 +26,13 @@ except (ImportError, ModuleNotFoundError):
 # Finally, slow step: try to open each one with tiffy.load() and report errors
 # or any that have anomalous shape.
 
+
 def parse_args():
     parser = ArgumentParser()
     parser.add_argument('dataset', help='The path to the root folder of'
                         ' the experiment to check. This is the folder that '
                         'contains the `HybCycle_*` folders.')
-    parser.add_argument('--output', type=Path, default=sys.stdout,
+    parser.add_argument('--output', default=sys.stdout,
                         help='The filename to print the '
                         'results report to. By default goes to stdout.')
     parser.add_argument('--fast', action='store_true', help='If supplied, only '
@@ -44,23 +44,26 @@ def parse_args():
 
     return args
 
+
 lab_grnam = 'hpc_CaiLab'
 lab_gid = grp.getgrnam(lab_grnam).gr_gid
 relevant_folders = ['initial_background', 'final_background', 'segmentation',
                     'Labeled_Images', 'Labeled_Images_Cytoplasm']
+
 
 def test_open_tiff(fname):
     im = tiffy.load(fname)
 
     return im
 
+
 def test_tiff_dtype(im):
     if im is None:
         return
 
-    if im.dtype != np.uint16:
-        raise TypeError(f'Image datatype is {im.dtype}, should be'
-                        'np.uint16.')
+    assert im.dtype == np.uint16, \
+        f'Image datatype is {im.dtype}, should be np.uint16.'
+
 
 def test_hyb_cycle_name(folder):
     if isinstance(folder, Path):
@@ -70,12 +73,12 @@ def test_hyb_cycle_name(folder):
 
     full_match = full_hyb_folder_re.match(folder)
 
-    if full_match is None:
-        raise ValueError(f'Invalid folder name `{folder}`. '
-                         'Any folder containing `Hyb` should be '
-                         'of the form HybCycle_N, where N is a number.'
-                         )
+    assert full_match is not None, \
+        f'Invalid folder name `{folder}`. Any folder containing `Hyb` should be ' \
+        f'of the form HybCycle_N, where N is a number.'
+
     return full_match.group(1)
+
 
 def test_tiff_stack_name(fname):
     if isinstance(fname, Path):
@@ -85,42 +88,43 @@ def test_tiff_stack_name(fname):
 
     match = tiff_stack_re.match(fname)
 
-    if match is None:
-        raise ValueError(f'Invalid TIFF stack name `{fname}`. '
-                         'Each TIFF stack should be of the form '
-                         'MMStack_PosN.ome.tif, where N is a number.'
-                         )
+    assert match is not None, \
+        f'Invalid TIFF stack name `{fname}`. Each TIFF stack should be of the form ' \
+        f'MMStack_PosN.ome.tif, where N is a number.'
+
     return match.group(1)
 
 
 def test_gid(path_stat):
-    if path_stat.st_gid != lab_gid:
-        raise PermissionError(f'Group ID does not match that of '
-                              f'{lab_grnam}, {lab_gid}. Need to `chgrp` this file.')
+    assert path_stat.st_gid == lab_gid, \
+        f'Group ID does not match that of ' \
+        f'{lab_grnam}, {lab_gid}. Need to `chgrp` this file.'
+
 
 def test_user_perms(path_stat):
     mode = path_stat.st_mode
     user_perms = (mode & stat.S_IRWXU) >> 6
 
     if stat.S_ISDIR(mode):
-        req_user = 7
+        req_user = (7,)
     else:
-        req_user = 6
+        req_user = (6, 7)
 
-    if user_perms < req_user:
-        raise PermissionError(f'File requires owner permission mode {req_user}')
+    assert user_perms in req_user, \
+        f'File requires owner permission mode {req_user}'
+
 
 def test_group_perms(path_stat):
     mode = path_stat.st_mode
     group_perms = (mode & stat.S_IRWXG) >> 3
 
     if stat.S_ISDIR(mode):
-        req_group = 5
+        req_group = (5, 7)
     else:
-        req_group = 4
+        req_group = (4, 5, 6, 7)
 
-    if group_perms < req_group:
-        raise PermissionError(f'File requires group permission mode {req_group}')
+    assert group_perms in req_group, \
+        f'File requires group permission mode {req_group}'
 
 
 def test_stat(path):
@@ -131,16 +135,17 @@ def test_stat(path):
     try:
         path_stat = path.stat()
         size = path_stat.st_size
-    except (OSError, PermissionError) as e:
+    except AssertionError as e:
         errors.append(e)
 
     for test in (test_gid, test_user_perms, test_group_perms):
         try:
             test(path_stat)
-        except PermissionError as e:
+        except AssertionError as e:
             errors.append(e)
 
     return errors, size
+
 
 def find_relevant_folders(root):
     root = Path(root)
@@ -158,7 +163,7 @@ def find_relevant_folders(root):
             try:
                 hyb_num = test_hyb_cycle_name(f.name)
                 entry['number'] = int(hyb_num)
-            except ValueError as e:
+            except AssertionError as e:
                 entry['errors'].append(e)
 
             hyb_folder_info.append(entry)
@@ -183,12 +188,13 @@ def test_image_folder_contents(folder):
         try:
             pos_number = test_tiff_stack_name(c)
             entry['number'] = int(pos_number)
-        except ValueError as e:
+        except AssertionError as e:
             entry['errors'].append(e)
 
         folder_contents_info.append(entry)
 
     return folder_contents_info
+
 
 def test_image_opening(entry):
     updated_entry = copy(entry)
@@ -205,12 +211,13 @@ def test_image_opening(entry):
 
     try:
         test_tiff_dtype(im)
-    except TypeError as e:
+    except AssertionError as e:
         updated_entry['opening_errors'].append(e)
 
     del im
 
     return updated_entry
+
 
 def check_all_images(results, hyb_nums=None, pos_nums=None):
     to_check = []
@@ -234,7 +241,8 @@ def check_all_images(results, hyb_nums=None, pos_nums=None):
             im_entry_copy['hyb_number'] = hyb_entry['number']
             to_check.append(im_entry_copy)
 
-    checked = []
+    opening_errors = []
+    has_opening_errors = False
 
     with ThreadPoolExecutor(max_workers=10) as exe:
         futures = []
@@ -248,22 +256,34 @@ def check_all_images(results, hyb_nums=None, pos_nums=None):
 
             result = fut.result(1)
             if len(result['opening_errors']) > 0:
-                checked.append(result)
+                has_opening_errors = True
+                opening_errors.append(result)
 
-    return checked
+    return opening_errors, has_opening_errors
+
 
 def check_tree(root):
     root = Path(root)
 
+    has_errors = False
+
     hyb_folder_info, extra_folders = find_relevant_folders(root)
 
     for folder_entry in hyb_folder_info:
+        if len(folder_entry['errors']) > 0:
+            has_errors = True
+
         folder_entry['contents'] = test_image_folder_contents(folder_entry['path'])
 
-    return hyb_folder_info, extra_folders
+        if any([len(c['errors']) > 0 for c in folder_entry['contents']]):
+            has_errors = True
+
+    return hyb_folder_info, extra_folders, has_errors
+
 
 def global_checks(results, image_results=None):
     pass
+
 
 def sort_key(d):
     n = d['number']
@@ -272,11 +292,14 @@ def sort_key(d):
     else:
         return n
 
+
 def print_errors(results, extra_folders, output_file):
+    print('File Structure and Permissions Errors', file=output_file)
+    print('---------------------------------------', file=output_file)
     results = sorted(results, key=sort_key)
 
     for extra in extra_folders:
-        print(f'Note: extra folder {extra}', file=output_file)
+        print(f'Note: extra folder `{extra}`', end='\n\n', file=output_file)
 
     for folder_entry in results:
         folder_errors = folder_entry['errors']
@@ -289,13 +312,11 @@ def print_errors(results, extra_folders, output_file):
         folder_number = folder_entry['number']
 
         if len(folder_errors) == 0 and len(folder_contents_errors) == 0:
-            print(f'{folder_name}: No problems.', file=output_file)
+            print(f'`{folder_name}`: No problems.', end='\n\n', file=output_file)
             continue
 
-        print(f'{folder_name}')
-
         if len(folder_errors) > 0:
-            print(f'{len(folder_errors)} folder errors.', file=output_file)
+            print(f'`{folder_name}`: {len(folder_errors)} folder errors.', file=output_file)
             for e in folder_errors:
                 print('    ', str(e), file=output_file)
 
@@ -308,6 +329,7 @@ def print_errors(results, extra_folders, output_file):
                       file=output_file)
                 for e in im_errors:
                     print('        ', str(e), file=output_file)
+        print('\n\n', file=output_file)
 
 
 def print_opening_errors(opening_results, output_file):
@@ -324,16 +346,26 @@ def print_opening_errors(opening_results, output_file):
         for e in im_errors:
             print('        ', str(e), file=output_file)
 
+
 def main(args):
+    has_errors = False
+    has_opening_errors = False
+
+    if args.output != sys.stdout:
+        output_parent = Path(args.output).parent
+        output_parent.mkdir(parents=True, exist_ok=True, mode=0o2770)
+
     with open(args.output, 'w') as output_file:
-        results, extras = check_tree(args.dataset)
+        results, extras, has_errors = check_tree(args.dataset)
 
         print_errors(results, extras, output_file)
 
         if not args.fast:
-            opening_results = check_all_images(results)
+            opening_results, has_opening_errors = check_all_images(results)
             print_opening_errors(opening_results, output_file)
+
+    return int(has_errors or has_opening_errors)
 
 if __name__ == '__main__':
     args = parse_args()
-    main(args)
+    sys.exit(main(args))
