@@ -57,6 +57,7 @@ class OMEImageLoader:
             schema=None,
 
     ):
+        self.given_file = None
         self.metadata_file = None
         self.raw_metadata = None
         self.metadata_etree = None
@@ -71,6 +72,7 @@ class OMEImageLoader:
             raise ValueError('The supplied file has no OME metadata readable by tifffile.')
 
         fpath = Path(fname)
+        self.given_file = fpath
 
         given_tree = etree.XML(given_metadata.encode())
         root_namespace = given_tree.nsmap.get(None)
@@ -140,8 +142,22 @@ class OMEImageLoader:
 
         self.metadata = result
 
-    def get_metadata(self, fname):
-        fname = Path(fname).resolve()
+    def _resolve_fname(self, fname=None):
+        if not fname:
+            fname = self.given_file
+
+        fname = Path(fname)
+
+        if len(fname.parts) == 1:
+            fname = self.root / fname
+
+        fname = fname.resolve()
+
+        return fname
+
+    def get_metadata(self, fname=None):
+
+        fname = self._resolve_fname(fname)
 
         if not self.root.samefile(fname.parent):
             raise ValueError(f'Target file {fname} is not in the same directory '
@@ -151,7 +167,10 @@ class OMEImageLoader:
 
         return self.metadata[stem]
 
-    def imread(self, fname):
+    def imread(self, fname=None):
+
+        fname = self._resolve_fname(fname)
+
         plane_metadata = self.get_metadata(fname)['planes']
 
         pil_im = pil_imopen(fname)
@@ -307,6 +326,17 @@ def _get_n_frames(image):
 
     return n_frames
 
+def _get_2d_shape(image):
+    shape = None
+    if isinstance(image, Image.Image):
+        shape = image.size
+    elif isinstance(image, tif.TiffFile):
+        shape = image.series[0].shape[-2:]
+    else:
+        raise TypeError('Unsupported argument to get_2d_shape; must be '
+                        'PIL.Image or tifffile.TiffFile.')
+
+    return shape
 
 def _get_frame_iter(image):
     frame_iter = None
@@ -368,10 +398,10 @@ def hash_frames_to_ndarray(
         format_class=ImHashV1,
         dtype=np.uint16
 ):
-    assert isinstance(image, (Image.Image, tif.TiffFile))
+    assert isinstance(image, (tif.TiffFile, Image.Image))
     assert _get_n_frames(image) == len(hashes)
 
-    full_shape = shape + image.pages[0].shape
+    full_shape = shape + _get_2d_shape(image)
     output = np.zeros(full_shape, dtype=dtype)
 
     for i, frame in enumerate(_get_frame_iter(image)):
@@ -408,11 +438,11 @@ def hash_imread(
     """
 
     if isinstance(image, (str, Path)):
-        image = tif.TiffFile(image)
+        image = Image.open(image)
     elif isinstance(image, (tif.TiffFile, Image.Image)):
         pass
     else:
-        raise TypeError('image must be string, Path, tifffile.TiffFile or PIL.Image.Image.')
+        raise TypeError('image must be string, Path, or PIL.Image.Image.')
 
     hashes, shape = parse_nd_image_hashes(image, format_class=format_class)
 
@@ -456,6 +486,8 @@ def hash_imwrite(
         file,
         data,
         metadata=encoded_hashes,
+        # This is essential to not assume 3-Z images are RGB
+        photometric=tif.TIFF.PHOTOMETRIC.MINISBLACK,
         **kwargs
     )
 
