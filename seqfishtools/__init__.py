@@ -7,5 +7,7 @@ from .util import (
     pil_frames_to_ndarray,
     pil2numpy,
     find_matching_files,
-    OMEImageLoader
+    OMEImageLoader,
+    hash_imread,
+    hash_imwrite
 )

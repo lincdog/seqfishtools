@@ -23,6 +23,8 @@ schemas = {
     Path(__file__).parent / 'xml/ome.xsd'
 }
 
+hash_format_classes = dict()
+
 
 def _convert_types(data):
     data = dict(data)
@@ -163,6 +165,299 @@ class OMEImageLoader:
         )
 
         return im_arr
+
+
+class ImHashFormat:
+    """
+    Base class for generating 2D frame hash-based image metadata
+    """
+    @staticmethod
+    def hash_frame(frame):
+        raise NotImplementedError
+
+    @classmethod
+    def encode(cls, inds):
+        raise NotImplementedError
+
+    @classmethod
+    def decode(cls, val):
+        raise NotImplementedError
+
+
+class ImHashV1(ImHashFormat):
+    prefix = '__ImHashV1:'
+    delim = ','
+
+    @staticmethod
+    def hash_frame(frame):
+        return hash(frame.tobytes())
+
+    @classmethod
+    def encode(cls, inds):
+        joined = cls.delim.join([str(i) for i in inds])
+
+        return cls.prefix + joined
+
+    @classmethod
+    def decode(cls, val):
+        assert val.startswith(cls.prefix), f'Invalid prefix, should be {cls.prefix}'
+
+        val_stripped = val.removeprefix(cls.prefix)
+
+        return tuple([int(s) for s in val_stripped.split(cls.delim)])
+
+
+def hash_nd_image(im, format_class=ImHashV1):
+    """
+    Given an ndarray of any shape, generate a dict where the keys are hash values
+    of its 2D slices, and the values are a tuple of coordinate indices that correspond
+    to that 2D slice. This is assuming the last 2 dimensions of the array are Y and X,
+    and that the array is a (n-2)d compendium of these 2D images.
+    """
+
+    hashes = dict()
+
+    for inds in np.ndindex(im.shape[:-2]):
+        slice_hash = format_class.hash_frame(im[inds])
+        hashes[slice_hash] = inds
+
+    return hashes
+
+
+def encode_nd_hashes(hashes, format_class=ImHashV1):
+    """
+    Given a dict of the form returned by hash_nd_image, returns a string
+    formatted dict according to the format_class given. Converts the keys
+    (hash values) to string, and uses the format_class.encode() function on
+    the tuple of coordinates for each item.
+    """
+    hashes_formatted = dict()
+
+    for k_int, inds in hashes.items():
+        k_str = str(k_int)
+
+        formatted_inds = format_class.encode(inds)
+
+        hashes_formatted[k_str] = formatted_inds
+
+    return hashes_formatted
+
+
+def decode_nd_hashes(hashes_formatted, format_class=ImHashV1):
+    """
+    Reverse of encode_nd_hashes: given a string-formatted dict of hash, coordinate
+    indices, uses the format_class.decode() method to convert back to a tuple of
+    coordinate indices.
+    """
+
+    hashes = dict()
+
+    for k, v in hashes_formatted.items():
+        if not (isinstance(v, str) and v.startswith(format_class.prefix)):
+            continue
+
+        k_int = int(k)
+        hashes[k_int] = format_class.decode(v)
+
+    return hashes
+
+
+def _get_image_description(image):
+    """
+    Given a PIL.Image.Image or tifffile.TiffFile instance, returns the appropriate
+    metadata dict (from the 'ImageDescription' tag) that holds the hash: coord pairs
+    when saved using hash_imwrite.
+    """
+    if isinstance(image, Image.Image):
+        init_pos = image.tell()
+        image.seek(0)
+        image_description = image.tag_v2.named().get('ImageDescription')
+
+        try:
+            raw = json.loads(image_description)
+        except json.decoder.JSONDecodeError:
+            raise ValueError('Supplied image ImageDescription tag does not contain'
+                             ' valid JSON data.')
+        finally:
+            image.seek(init_pos)
+
+    elif isinstance(image, tif.TiffFile):
+        raw = image.shaped_metadata[0]
+    else:
+        raise TypeError('Unsupported argument to get_image_metadata; must be '
+                        'PIL.Image or tifffile.TiffFile.')
+
+    if not raw:
+        raise ValueError('Empty ImageDescription metadata for image')
+
+    return raw
+
+
+def _get_n_frames(image):
+    if isinstance(image, Image.Image):
+        init_pos = image.tell()
+        image.seek(0)
+        n_frames = image.n_frames
+        image.seek(init_pos)
+    elif isinstance(image, tif.TiffFile):
+        n_frames = len(image.pages)
+    else:
+        raise TypeError('Unsupported argument to get_n_frames; must be '
+                        'PIL.Image or tifffile.TiffFile.')
+
+    return n_frames
+
+
+def _get_frame_iter(image):
+    frame_iter = None
+
+    if isinstance(image, Image.Image):
+        image.seek(0)
+        frame_iter = ImageSequence.Iterator(image)
+    elif isinstance(image, tif.TiffFile):
+        frame_iter = iter(image.pages)
+    else:
+        raise TypeError('Unsupported argument to get_frame_iter; must be '
+                        'PIL.Image or tifffile.TiffFile.')
+    return frame_iter
+
+
+def _get_frame_arr(frame, dtype=np.uint16):
+    frame_arr = None
+
+    if isinstance(frame, Image.Image):
+        frame_arr = pil2numpy(frame, dtype=dtype)
+    elif isinstance(frame, tif.TiffPage):
+        frame_arr = frame.asarray()
+    else:
+        raise TypeError('Unsupported argument to get_frame_arr; must be '
+                        'PIL.Image or tifffile.TiffPage.')
+    return frame_arr
+
+
+def parse_nd_image_hashes(image, format_class=ImHashV1):
+    """
+    Given a PIL.Image.Image or tifffile.TiffFile instance, retrieve its ImageDescription
+    metadata and decode it according to format_class to produce a dict that can be used
+    to assign 2D images to a position in an nd array. Also determines the implied shape of
+    the image (except for the final 2 dimensions) from the metadata.
+    """
+    raw = _get_image_description(image)
+    n_frames = _get_n_frames(image)
+
+    out = decode_nd_hashes(raw, format_class=format_class)
+
+    assert n_frames == len(out), \
+        f'ImageDescription metadata did not contain an entry for each of {n_frames} image frames.'
+
+    ndims = len(list(out.values())[0])
+    shape = tuple([1 + max([v[dim] for v in out.values()])
+                   for dim in range(ndims)
+                   ])
+
+    if 'shape' in raw:
+        assert shape == tuple(raw['shape'][:-2])
+
+    return out, shape
+
+
+def hash_frames_to_ndarray(
+        image,
+        hashes,
+        shape,
+        format_class=ImHashV1,
+        dtype=np.uint16
+):
+    assert isinstance(image, (Image.Image, tif.TiffFile))
+    assert _get_n_frames(image) == len(hashes)
+
+    full_shape = shape + image.pages[0].shape
+    output = np.zeros(full_shape, dtype=dtype)
+
+    for i, frame in enumerate(_get_frame_iter(image)):
+        frame_arr = _get_frame_arr(frame)
+
+        frame_hash = format_class.hash_frame(frame_arr)
+
+        try:
+            nd_index = hashes[frame_hash]
+        except KeyError:
+            raise ValueError(f'Frame {i} has hash value of {frame_hash},'
+                             ' which is not present in the metadata dictionary that was saved.'
+                             )
+        output[nd_index] = frame_arr.copy()
+        del frame_arr
+
+    return output
+
+
+def hash_imread(
+        image,
+        swapaxes=False,
+        ensure_4d=False,
+        backup=tif.imread,
+        format_class=ImHashV1,
+        dtype=np.uint16
+):
+    """
+    Given a filename or TiffFile or PIL.Image, use the hashing system to read it
+    in as a multidimensional TIFF image and return a properly arranged numpy ndarray.
+    Will error if the image was not saved with properly encoded hash: indices information
+    in its 'ImageDescription' tag (number 270), and if the same format_class is not used
+    that was used to write the image.
+    """
+
+    if isinstance(image, (str, Path)):
+        image = tif.TiffFile(image)
+    elif isinstance(image, (tif.TiffFile, Image.Image)):
+        pass
+    else:
+        raise TypeError('image must be string, Path, tifffile.TiffFile or PIL.Image.Image.')
+
+    hashes, shape = parse_nd_image_hashes(image, format_class=format_class)
+
+    imarr = hash_frames_to_ndarray(
+        image,
+        hashes,
+        shape,
+        format_class=format_class,
+        dtype=dtype
+    )
+
+    if ensure_4d and imarr.ndim < 4:
+        while imarr.ndim < 4:
+            imarr = imarr[None]
+
+    if swapaxes:
+        imarr = imarr.swapaxes(0, 1)
+
+    return imarr
+
+
+def hash_imwrite(
+        file,
+        data,
+        format_class=ImHashV1,
+        **kwargs
+):
+    """
+    Given a filename and an arbitrary numpy array with 2 or more dimensions, saves
+    the array as a TIFF file with 2D frame hash values encoded in its ImageDescription
+    tag via the `metadata` argument to tifffile.imwrite. The hash function and
+    conversion between indices tuples and strings are defined by the format_class
+    class methods hash_frame() and encode().
+    """
+    assert data.ndim >= 2, 'Supplied data must have at least 2 dimensions.'
+
+    hashes = hash_nd_image(data, format_class=format_class)
+    encoded_hashes = encode_nd_hashes(hashes, format_class=format_class)
+
+    tif.imwrite(
+        file,
+        data,
+        metadata=encoded_hashes,
+        **kwargs
+    )
 
 
 def make_align_name(position, hyb):
