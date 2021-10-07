@@ -51,6 +51,23 @@ def _convert_types(data):
 
 
 class OMEImageLoader:
+    """
+    OMEImageLoader
+
+    A class to load TIFF stacks produced by MicroManager using the stored OME-XML
+    metadata to intelligently order the 2D image slices. When you initialize with a
+    path or filename, determines where the OME-XML metadata for that file is stored -
+    typically in the very first position image within a multi-position experiment -
+    and reads that metadata in. Then calling the object's imread() method on a path
+    in the same directory will read that image in using the stored metadata.
+
+    Calling imread() with no arguments reads in the file that was initially supplied
+    to the constructor, so you can use it like this:
+
+        image = OMEImageLoader('HybCycle_0/MMStack_Pos2.ome.tif').imread()
+
+    to quickly obtain an image as an array.
+    """
 
     def __init__(
             self,
@@ -170,6 +187,15 @@ class OMEImageLoader:
 
     def imread(self, fname=None):
 
+        """
+        imread
+
+        Read in an image in the same folder as the object's metadata file and return
+        a properly-shaped array. With no arguments, reads in the image file that was
+        passed to the constructor. A path that is only a filename (no slashes or
+        directory names) is assumed to be in the same folder as the metadata file,
+        so reading in multiple positions in the same folder is more concise.
+        """
         fname = self._resolve_fname(fname)
 
         plane_metadata = self.get_metadata(fname)['planes']
@@ -223,6 +249,9 @@ class ImHashV1(ImHashFormat):
         assert val.startswith(cls.prefix), f'Invalid prefix, should be {cls.prefix}'
 
         val_stripped = val.removeprefix(cls.prefix)
+
+        if val_stripped == '':
+            return tuple()
 
         return tuple([int(s) for s in val_stripped.split(cls.delim)])
 
@@ -413,6 +442,12 @@ def hash_frames_to_ndarray(
         format_class=ImHashV1,
         dtype=np.uint16
 ):
+    """
+    Given an PIL.Image.Image or tifffile.TiffFile as well as a dict of
+    hash: indices pairs from parse_nd_image_hashes, return a properly-arranged
+    multidimensional Numpy array of the given dtype. Also requires the class used
+    to create the hash dict so that the correct hash function can be used.
+    """
     assert isinstance(image, (tif.TiffFile, Image.Image))
     assert _get_n_frames(image) == len(hashes)
 
@@ -457,7 +492,7 @@ def hash_imread(
     elif isinstance(image, (tif.TiffFile, Image.Image)):
         pass
     else:
-        raise TypeError('image must be string, Path, or PIL.Image.Image.')
+        raise TypeError('image must be string, Path, tifffile.TiffFile, or PIL.Image.Image.')
 
     hashes, shape = parse_nd_image_hashes(image, format_class=format_class)
 
